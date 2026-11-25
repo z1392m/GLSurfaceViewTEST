@@ -1,0 +1,94 @@
+name: Android Native SO Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    env:
+      NDK_VERSION: '24.0.8215888'
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Android NDK r24
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$SDK_ROOT"
+          sdkmanager --sdk_root="$SDK_ROOT" --install "ndk;$NDK_VERSION"
+          echo "NDK_HOME=$SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Verify native build configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          JNI="$GITHUB_WORKSPACE/app/src/main/jni"
+          test -x "$NDK_HOME/ndk-build"
+          test -f "$JNI/Android.mk"
+          test -f "$JNI/Application.mk"
+          cat "$NDK_HOME/source.properties"
+          cat "$JNI/Android.mk"
+          cat "$JNI/Application.mk"
+
+      - name: Compile ARM64 and ARM32 libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          JNI="$GITHUB_WORKSPACE/app/src/main/jni"
+
+          "$NDK_HOME/ndk-build" \
+            NDK_PROJECT_PATH=null \
+            APP_BUILD_SCRIPT="$JNI/Android.mk" \
+            NDK_APPLICATION_MK="$JNI/Application.mk" \
+            APP_PLATFORM=android-24 \
+            APP_ABI="arm64-v8a armeabi-v7a" \
+            APP_OPTIM=release \
+            NDK_OUT="$GITHUB_WORKSPACE/obj" \
+            NDK_LIBS_OUT="$GITHUB_WORKSPACE/libs" \
+            -j"$(nproc)"
+
+      - name: Verify shared libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          for ABI in arm64-v8a armeabi-v7a; do
+            SO="libs/$ABI/libImGui.so"
+            test -s "$SO"
+            file "$SO"
+            readelf -h "$SO"
+            readelf -h "$SO" | grep -E 'Type:.*DYN'
+            if [[ "$ABI" == arm64-v8a ]]; then
+              readelf -h "$SO" | grep -E 'Machine:.*AArch64'
+            else
+              readelf -h "$SO" | grep -E 'Machine:.*ARM$'
+            fi
+            readelf --dyn-syms --wide "$SO" | grep -E '[[:space:]]JNI_OnLoad$'
+            sha256sum "$SO"
+          done
+
+      - name: Upload ARM64 library
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImGui-ARM64
+          path: libs/arm64-v8a/libImGui.so
+          if-no-files-found: error
+
+      - name: Upload ARM32 library
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImGui-ARM32
+          path: libs/armeabi-v7a/libImGui.so
+          if-no-files-found: error
