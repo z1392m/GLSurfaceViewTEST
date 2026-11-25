@@ -1,5 +1,6 @@
 #pragma once
 #include <jni.h>
+#include <android/log.h>
 #include <unistd.h>
 #include <cstdlib>
 #include <cstring>
@@ -10,53 +11,80 @@ inline bool IsTouchInsideImGui(float x, float y) {
     ImGuiContext* g = ImGui::GetCurrentContext();
     if (!g) return false;
 
-    for (int i = g->Windows.Size - 1; i >= 0; i--) {
+    for (int i = g->Windows.Size - 1; i >= 0; --i) {
         ImGuiWindow* window = g->Windows[i];
-        if (!window || !window->Active || window->Hidden || (window->Flags & ImGuiWindowFlags_NoInputs)) {
+        if (!window || !window->Active || window->Hidden ||
+            (window->Flags & ImGuiWindowFlags_NoMouseInputs)) {
             continue;
         }
-
-        ImRect bb = window->Rect();
-        if (bb.Contains(ImVec2(x, y))) {
-            return true;
-        }
+        if (window->Rect().Contains(ImVec2(x, y))) return true;
     }
     return false;
 }
 
+// Protected by g_ImGuiMutex, like the ImGui input queue.
+inline bool g_TouchCaptured = false;
+
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_rrq_overlay_NativeHelper_onNativeTouch(JNIEnv* env, jclass clazz, jfloat x, jfloat y, jint action) {
+Java_com_rrq_overlay_NativeHelper_onNativeTouch(
+    JNIEnv*, jclass, jfloat x, jfloat y, jint action) {
     std::lock_guard<std::mutex> lock(g_ImGuiMutex);
-    if (!ImGui::GetCurrentContext()) return JNI_FALSE;
+    if (!ImGui::GetCurrentContext()) {
+        g_TouchCaptured = false;
+        return JNI_FALSE;
+    }
 
     ImGuiIO& io = ImGui::GetIO();
+    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+
     switch (action) {
-        case 0: 
-            if (IsTouchInsideImGui(x, y)) {
-                io.MousePos = ImVec2(x, y);
-                io.MouseDown[0] = true;
-                return JNI_TRUE; 
+        case 0: { // ACTION_DOWN
+            if (g_TouchCaptured) {
+                io.AddMouseButtonEvent(0, false);
+                g_TouchCaptured = false;
             }
+            g_TouchCaptured = IsTouchInsideImGui(x, y);
+            __android_log_print(ANDROID_LOG_DEBUG, "ImGuiTouch",
+                "DOWN %.1f, %.1f captured=%d display=%.0fx%.0f",
+                x, y, static_cast<int>(g_TouchCaptured),
+                io.DisplaySize.x, io.DisplaySize.y);
+            if (!g_TouchCaptured) return JNI_FALSE;
+
+            io.AddMousePosEvent(x, y);
+            io.AddMouseButtonEvent(0, true);
+            return JNI_TRUE;
+        }
+        case 1: { // ACTION_UP
+            if (!g_TouchCaptured) return JNI_FALSE;
+            io.AddMousePosEvent(x, y);
+            io.AddMouseButtonEvent(0, false);
+            g_TouchCaptured = false;
+            return JNI_TRUE;
+        }
+        case 2: // ACTION_MOVE
+            if (!g_TouchCaptured) return JNI_FALSE;
+            io.AddMousePosEvent(x, y);
+            return JNI_TRUE;
+
+        case 3: // ACTION_CANCEL
+            if (!g_TouchCaptured) return JNI_FALSE;
+            io.AddMouseButtonEvent(0, false);
+            g_TouchCaptured = false;
+            return JNI_TRUE;
+
+        default:
             return JNI_FALSE;
-        case 1: 
-            io.MousePos = ImVec2(x, y);
-            io.MouseDown[0] = false;
-            return JNI_TRUE;
-        case 2: 
-            io.MousePos = ImVec2(x, y);
-            return JNI_TRUE;
-        case 3: 
-            io.MouseDown[0] = false;
-            return JNI_TRUE;
     }
-    return JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_rrq_overlay_NativeHelper_onNativeScroll(JNIEnv* env, jclass clazz, jfloat scrollY) {
+Java_com_rrq_overlay_NativeHelper_onNativeScroll(
+    JNIEnv*, jclass, jfloat scrollY) {
     std::lock_guard<std::mutex> lock(g_ImGuiMutex);
-    if (!ImGui::GetCurrentContext()) return;
-    ImGui::GetIO().MouseWheel += (scrollY * 0.05f);
+    if (!ImGui::GetCurrentContext() || !g_TouchCaptured) return;
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+    io.AddMouseWheelEvent(0.0f, scrollY * 0.05f);
 }
 
 inline const JNINativeMethod g_NativeMethods[] = {
