@@ -13,23 +13,26 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
-    env:
-      NDK_VERSION: '24.0.8215888'
-
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
-      - name: Install Android NDK r24
+      - name: Download Android NDK r24
         shell: bash
         run: |
           set -euo pipefail
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-          test -n "$SDK_ROOT"
-          sdkmanager --sdk_root="$SDK_ROOT" --install "ndk;$NDK_VERSION"
-          echo "NDK_HOME=$SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          ARCHIVE="$RUNNER_TEMP/android-ndk-r24-linux.zip"
+          curl --fail --location --retry 3 --retry-delay 2 \
+            https://dl.google.com/android/repository/android-ndk-r24-linux.zip \
+            -o "$ARCHIVE"
+          echo "eceb18f147282eb93615eff1ad84a9d3962fbb31  $ARCHIVE" | sha1sum -c -
+          unzip -q "$ARCHIVE" -d "$RUNNER_TEMP"
+          rm -f "$ARCHIVE"
+          NDK="$RUNNER_TEMP/android-ndk-r24"
+          test -x "$NDK/ndk-build"
+          echo "NDK_HOME=$NDK" >> "$GITHUB_ENV"
 
       - name: Verify native build configuration
         shell: bash
@@ -80,14 +83,14 @@ jobs:
           done
 
       - name: Upload ARM64 library
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ImGui-ARM64
           path: libs/arm64-v8a/libImGui.so
           if-no-files-found: error
 
       - name: Upload ARM32 library
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ImGui-ARM32
           path: libs/armeabi-v7a/libImGui.so
